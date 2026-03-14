@@ -1,0 +1,396 @@
+{$CLEO .s}
+{$USE CLEO+}
+NOP
+SCRIPT_NAME 'LMINE'
+
+//=========================================================
+// LMINE - Landmine System (Autor: AlvarynGTA)
+//---------------------------------------------------------
+// ARGUMENTS
+// --------------------------------------------------------
+INT playerID, charActor, weaponMineID, modelMineID, timeReady, timeLimit, hiddenFlag, debugFlag, countLimit, $LANDMINE_COUNT
+// --------------------------------------------------------
+// VARIABLES
+FLOAT mineX, mineY, mineZ
+INT objCol, objMine, objHealth, flagVehAttach = 0
+INT closestVeh
+
+FLOAT Nx, Ny, Nz, Nl, tempN
+FLOAT yaw, roll, pitch, cosYaw, sinYaw, Nxn, Nyn
+//=========================================================
+//NOTE - missing level wanted in plant mine, and peds fearing
+IF debugFlag >= 1 //DEBUG
+THEN PRINT_FORMATTED "[LMINE] Arguments: PLY:%i; CHR:%i; WPN:%i; MDL:%i; ARM:%i; EXP:%i; LIM:%i; CNT:%i; HID:%i; DBG:%i" 2000 playerID charActor weaponMineID modelMineID timeReady timeLimit countLimit $LANDMINE_COUNT hiddenFlag debugFlag
+END
+
+////////////////////////////////////////////////////////////////////////////
+// =========================================================
+:system_landmine
+// =========================================================
+////////////////////////////////////////////////////////////////////////////
+
+// =========================================================
+:verify_char
+// =========================================================
+
+IF NOT DOES_CHAR_EXIST charActor
+THEN GOTO @end_script
+END
+
+IF playerID <> -1
+THEN CLEAR_CHAR_TASKS charActor
+END
+
+IF IS_CHAR_PLAYING_ANIM charActor "BOM_Plant"
+THEN GOTO @end_script
+END
+GOTO @load_request
+// =========================================================
+:load_request
+// =========================================================
+IF OR
+    NOT IS_MODEL_IN_CDIMAGE modelMineID
+    NOT IS_MODEL_IN_CDIMAGE #BARREL4
+THEN
+    PRINT_FORMATTED_NOW "[LMINE] Invalid model ID! [Landmine:%i; Barrel:%i]" 3000 modelMineID #BARREL4
+    GOTO @end_script
+END
+
+REQUEST_MODEL modelMineID
+REQUEST_MODEL #BARREL4
+REQUEST_ANIMATION "BOMBER"
+
+LOAD_ALL_MODELS_NOW
+
+GOTO @start_anim
+// =========================================================
+:start_anim
+// =========================================================
+TIMERA = 0
+
+IF playerID <> -1
+THEN
+    SET_PLAYER_FIRE_BUTTON playerID 0
+    SET_PLAYER_CYCLE_WEAPON_BUTTON playerID 0
+    TASK_PLAY_ANIM charActor "BOM_Plant" "BOMBER" 4.0 0 0 0 0 -1
+ELSE TASK_PLAY_ANIM_NON_INTERRUPTABLE charActor "BOM_Plant" "BOMBER" 10.0 0 0 0 0 -1 // For peds
+END
+
+WAIT 5
+
+// Wait for end anim in frame
+:wait_anim
+WAIT 5
+IF AND
+    TIMERA <= 2100 // just time to plant a land mine
+    IS_CHAR_PLAYING_ANIM charActor "BOM_Plant"
+THEN GOTO @wait_anim
+END
+
+IF playerID <> -1
+THEN
+    SET_PLAYER_FIRE_BUTTON playerID 1
+    SET_PLAYER_CYCLE_WEAPON_BUTTON playerID 1
+END
+
+IF NOT DOES_CHAR_EXIST charActor
+THEN GOTO @release
+END
+
+IF NOT IS_CHAR_PLAYING_ANIM charActor "BOM_Plant"
+THEN
+    IF debugFlag >= 1 //DEBUG
+    THEN PRINT_STRING "[LMINE] Plant animation interrupted! Releasing..." 3000
+    END
+
+    IF playerID <> -1
+    THEN CLEAR_CHAR_TASKS charActor
+    END
+
+    GOTO @release
+END
+
+IF $LANDMINE_COUNT >= countLimit
+THEN
+    IF debugFlag >= 1 //DEBUG
+    THEN PRINT_FORMATTED "[LMINE] Count limit reached (%i/%i)! Releasing..." 3000 $LANDMINE_COUNT countLimit
+    END
+
+    IF playerID <> -1
+    THEN CLEAR_CHAR_TASKS charActor
+    END
+
+    GOTO @release
+ELSE $LANDMINE_COUNT += 1
+END
+GOTO @create_mine
+// =========================================================
+:create_mine
+// =========================================================
+// --- Reduce ammo if there is no active infinite ammo cheat or 100% game progress ---
+IF AND
+    NOT IS_CHEAT_ACTIVE 72 // CLEO+
+    $GAME_COMPLETE == 0
+    $RETURN_PROGRESS_PERCENTAGE < 100
+THEN ADD_AMMO_TO_CHAR charActor weaponMineID -1
+END
+
+IF playerID == -1 // For peds
+THEN MARK_CHAR_AS_NEEDED charActor
+END
+// Preliminary mine placement coordinates
+mineX, mineY, mineZ = GET_OFFSET_FROM_CHAR_IN_WORLD_COORDS charActor 0.0 0.6 0.0
+
+// Create Objects
+objMine = CREATE_OBJECT_NO_SAVE modelMineID mineX mineY mineZ 0 0 //mine object
+SET_OBJECT_SCALE objMine 1.2
+SET_OBJECT_VISIBLE objMine 0
+
+objCol = CREATE_OBJECT_NO_SAVE #BARREL4 mineX mineY mineZ 0 0 //invisible object with collision
+SET_OBJECT_VISIBLE objCol 0
+
+SET_OBJECT_RECORDS_COLLISIONS objCol 1
+SET_OBJECT_COLLISION objCol 0
+SET_OBJECT_COLLISION objMine 0
+
+SET_OBJECT_MASS objCol 1.0
+SET_OBJECT_TURN_MASS objCol 1.0
+ATTACH_OBJECT_TO_OBJECT objCol objMine 0.0 0.0 -0.4 0.0 0.0 0.0
+
+GOSUB @check_vehicle
+
+IF playerID == -1 // For peds
+THEN MARK_CHAR_AS_NO_LONGER_NEEDED charActor
+END
+GOTO @mine_ready
+
+// =========================================================
+:check_vehicle
+// =========================================================
+WAIT 10
+closestVeh, tempN = STORE_CLOSEST_ENTITIES charActor
+tempN = -1
+IF DOES_VEHICLE_EXIST closestVeh
+THEN
+    IF IS_CHAR_TOUCHING_VEHICLE charActor closestVeh
+    THEN
+        IF debugFlag >= 1 //DEBUG
+        THEN PRINT_FORMATTED_NOW "[LMINE] Landmine (%i/%i) attached to vehicle %i." 3000 $LANDMINE_COUNT countLimit closestVeh
+        END
+
+        ATTACH_OBJECT_TO_CAR objMine closestVeh 0.0 0.0 0.0 0.0 0.0 0.0
+        flagVehAttach = 1
+        RETURN
+    END
+END
+GOSUB @place_ground
+RETURN
+
+// =========================================================
+:place_ground
+// =========================================================
+
+//------------------------------------
+// Slopes (float)
+//------------------------------------
+// Point Z in X+ (float)
+tempN = mineX
+tempN += 0.1
+Nx = GET_GROUND_Z_FOR_3D_COORD tempN mineY mineZ
+// Point Z in Y+ (float)
+tempN = mineY
+tempN += 0.1
+Ny = GET_GROUND_Z_FOR_3D_COORD mineX tempN mineZ
+// Point Z in XY (float)
+tempN = GET_GROUND_Z_FOR_3D_COORD mineX mineY mineZ
+
+// deltaZx
+Nx -= tempN
+Nx /= 0.1
+// deltaZy
+Ny -= tempN
+Ny /= 0.1
+
+//------------------------------------
+// Plane Normal
+//------------------------------------
+Nx = Nx
+Nx *= -1.0
+Ny = Ny
+Ny *= -1.0
+Nz = 1.0
+
+// Normalize vector (float)
+Nl = Nx
+Nl *= Nx
+tempN = Ny
+tempN *= Ny
+Nl += tempN
+tempN = Nz
+tempN *= Nz
+Nl += tempN
+
+Nl = SQRT Nl
+IF Nl > 0.0
+THEN
+    Nx /= Nl
+    Ny /= Nl
+    Nz /= Nl
+END
+//------------------------------------
+// Rotate the normal by yaw (float)
+//------------------------------------
+yaw = GET_CHAR_HEADING charActor
+cosYaw = COS yaw
+sinYaw = SIN yaw
+
+// Nx'
+Nxn = Nx
+Nxn *= cosYaw
+tempN = Ny
+tempN *= sinYaw
+Nxn += tempN
+Nxn *= -1.0
+// Ny'
+Nyn = Nx
+Nyn *= sinYaw
+tempN = Ny
+tempN *= cosYaw
+Nyn -= tempN
+Nyn *= -1.0
+// Nz not changes
+Nz = Nz
+
+//------------------------------------
+// Extract angles
+//------------------------------------
+// roll = atan2(Ny', Nz)
+roll = GET_ANGLE_FROM_TWO_COORDS 0.0 0.0 Nyn Nz    // CLEO+
+// pitch = atan2(Nx', Nz)
+pitch = GET_ANGLE_FROM_TWO_COORDS 0.0 0.0 Nxn Nz   // CLEO+
+
+mineZ = GET_GROUND_Z_FOR_3D_COORD mineX mineY mineZ
+SET_OBJECT_COORDINATES objMine mineX mineY mineZ
+SET_OBJECT_ROTATION objMine roll pitch yaw
+
+IF debugFlag >= 1 //DEBUG
+THEN PRINT_FORMATTED_NOW "[LMINE] Landmine (%i/%i) placed in ground. [Ang(%.2f; %.2f; %.2f); Nrm(%.2f; %.2f; %.2f)]" 3000 $LANDMINE_COUNT countLimit roll pitch yaw Nxn Nyn Nz
+END
+RETURN
+
+// =========================================================
+:mine_ready
+// =========================================================
+SET_OBJECT_VISIBLE objMine 1
+REPORT_MISSION_AUDIO_EVENT_AT_OBJECT objMine 1002 // Planting sound
+
+IF playerID == -1 // For peds
+THEN playerID = 0
+END
+
+TIMERA = 0
+WHILE timeReady >= TIMERA // Time delay (default: 3 seconds)
+    WAIT 0
+    IF NOT IS_PLAYER_CONTROL_ON playerID
+    THEN GOTO @clean
+    END
+END
+
+IF hiddenFlag == 1
+THEN SET_OBJECT_VISIBLE objMine 0
+END
+SET_OBJECT_COLLISION objCol 1
+
+TIMERA = 0 //Timer limit
+GOTO @check_loop
+// =========================================================
+:check_loop
+// =========================================================
+WAIT 25
+
+IF OR
+    NOT DOES_OBJECT_EXIST objCol
+    NOT DOES_OBJECT_EXIST objMine
+THEN
+    IF debugFlag >= 1 //DEBUG
+    THEN PRINT_STRING "[LMINE] Landmine object missing! Cleaning..." 3000
+    END
+    GOTO @clean
+END
+
+IF TIMERA >= timeLimit // Time limit (default: 10 minutes)
+THEN
+    IF debugFlag >= 1 //DEBUG
+    THEN PRINT_STRING "[LMINE] Landmine expired! Cleaning..." 3000
+    END
+    GOTO @clean
+END
+
+IF flagVehAttach == 1
+THEN
+    IF NOT DOES_VEHICLE_EXIST closestVeh
+    THEN
+        IF debugFlag >= 1 //DEBUG
+        THEN PRINT_STRING "[LMINE] Attached vehicle disappeared! Cleaning..." 3000
+        END
+        GOTO @clean
+    END
+END
+
+IF NOT IS_PLAYER_CONTROL_ON playerID
+THEN
+    IF debugFlag >= 1 //DEBUG
+    THEN PRINT_STRING "[LMINE] Player control disabled! Cleaning..." 3000
+    END
+    GOTO @clean
+END
+
+//Check for explosion
+objHealth = GET_OBJECT_HEALTH objCol
+IF OR
+    objHealth <= 0
+    HAS_OBJECT_COLLIDED_WITH_ANYTHING objCol
+THEN
+    IF debugFlag >= 1 //DEBUG
+    THEN PRINT_STRING "[LMINE] Landmine exploded! Cleaning..." 3000
+    END
+
+    DETACH_OBJECT objCol 0.0 0.0 0.0 0
+    mineX, mineY, mineZ = GET_OFFSET_FROM_OBJECT_IN_WORLD_COORDS objMine 0.0 0.0 0.0
+    ADD_EXPLOSION mineX mineY mineZ 5
+    GOTO @clean
+END
+
+IF NOT IS_PLAYER_PLAYING playerID
+THEN
+    IF DOES_OBJECT_EXIST objCol
+    THEN MARK_OBJECT_AS_NO_LONGER_NEEDED objCol //The object will cease to exist when the game no longer needs it, or when it moves away from it or respawns due to being wasted/busted.
+    END
+    IF DOES_OBJECT_EXIST objMine
+    THEN MARK_OBJECT_AS_NO_LONGER_NEEDED objMine
+    END
+END
+
+GOTO @check_loop
+
+// ==================================================
+:clean
+// ==================================================
+IF $LANDMINE_COUNT > 0
+THEN $LANDMINE_COUNT -= 1
+END
+
+DELETE_OBJECT objCol
+DELETE_OBJECT objMine
+
+// ==================================================
+:release
+// ==================================================
+MARK_MODEL_AS_NO_LONGER_NEEDED modelMineID
+MARK_MODEL_AS_NO_LONGER_NEEDED #BARREL4
+REMOVE_ANIMATION  "BOMBER"
+
+// ==================================================
+:end_script
+// ==================================================
+TERMINATE_THIS_CUSTOM_SCRIPT
